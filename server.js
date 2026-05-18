@@ -4,6 +4,7 @@ import cors from "cors";
 import helmet from "helmet";
 import nodemailer from "nodemailer";
 import rateLimit from "express-rate-limit";
+import cron from "node-cron";
 
 import {
   acknowledgmentTemplate,
@@ -11,10 +12,10 @@ import {
 } from "./emailTemplates.js";
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 10000;
 
 // =========================================================
-// TRUST PROXY (Required for Render / express-rate-limit)
+// TRUST PROXY (Required for Render)
 // =========================================================
 app.set("trust proxy", 1);
 
@@ -40,8 +41,10 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow Postman, server-to-server, health checks
-      if (!origin) return callback(null, true);
+      // Allow Postman / curl / server-side requests
+      if (!origin) {
+        return callback(null, true);
+      }
 
       // Exact allowed origins
       if (allowedOrigins.includes(origin)) {
@@ -68,13 +71,14 @@ app.use(
 app.options("*", cors());
 
 // =========================================================
-// RATE LIMITING
+// RATE LIMITER
 // =========================================================
 const contactLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
+  windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5,
 
   message: {
+    success: false,
     error: "Too many requests. Please wait a few minutes and try again.",
   },
 
@@ -83,7 +87,7 @@ const contactLimiter = rateLimit({
 });
 
 // =========================================================
-// NODEMAILER TRANSPORTER
+// NODEMAILER CONFIGURATION
 // =========================================================
 const transporter = nodemailer.createTransport({
   service: "gmail",
@@ -97,12 +101,11 @@ const transporter = nodemailer.createTransport({
 // =========================================================
 // SMTP VERIFY
 // =========================================================
-transporter.verify((err, success) => {
+transporter.verify((err) => {
   if (err) {
     console.error("\n❌ SMTP VERIFY FAILED");
     console.error("Code:", err.code);
     console.error("Message:", err.message);
-    console.error("Response:", err.response);
     console.error("Full Error:", err);
   } else {
     console.log("\n✅ SMTP connection verified");
@@ -143,8 +146,10 @@ function validateContactInput({ name, email, message }) {
 }
 
 // =========================================================
-// HEALTH ROUTES
+// ROUTES
 // =========================================================
+
+// Root route
 app.get("/", (_req, res) => {
   return res.status(200).json({
     status: "ok",
@@ -152,6 +157,7 @@ app.get("/", (_req, res) => {
   });
 });
 
+// Health route
 app.get("/health", (_req, res) => {
   return res.status(200).json({
     status: "ok",
@@ -160,7 +166,7 @@ app.get("/health", (_req, res) => {
 });
 
 // =========================================================
-// CONTACT ROUTE
+// CONTACT FORM API
 // =========================================================
 app.post("/api/contact", contactLimiter, async (req, res) => {
   try {
@@ -191,7 +197,7 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     const cleanMessage = message.trim();
 
     // =========================
-    // EMAIL 1 - ACKNOWLEDGEMENT
+    // ACKNOWLEDGEMENT EMAIL
     // =========================
     await transporter.sendMail({
       from: `"Prashant Sali" <${process.env.GMAIL_USER}>`,
@@ -207,7 +213,7 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     });
 
     // =========================
-    // EMAIL 2 - NOTIFICATION
+    // NOTIFICATION EMAIL
     // =========================
     await transporter.sendMail({
       from: `"Portfolio Contact Form" <${process.env.GMAIL_USER}>`,
@@ -235,13 +241,30 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     console.error("\n❌ EMAIL SEND FAILED");
     console.error("Code:", err.code);
     console.error("Message:", err.message);
-    console.error("Response:", err.response);
     console.error("Full Error:", err);
 
     return res.status(500).json({
       success: false,
       error: "Failed to send message. Please try again later.",
     });
+  }
+});
+
+// =========================================================
+// KEEP RENDER SERVICE AWAKE
+// =========================================================
+
+cron.schedule("*/10 * * * *", async () => {
+  try {
+    const response = await fetch(
+      "https://portfolio-backend-10kd.onrender.com/health",
+    );
+
+    console.log(
+      `🔄 Self-ping success: ${response.status} (${new Date().toISOString()})`,
+    );
+  } catch (error) {
+    console.error("❌ Self-ping failed:", error.message);
   }
 });
 
@@ -269,10 +292,10 @@ app.use((err, _req, res, _next) => {
 });
 
 // =========================================================
-// SERVER START
+// START SERVER
 // =========================================================
 app.listen(PORT, () => {
-  console.log("\n🚀 Portfolio backend running");
+  console.log(`\n🚀 Portfolio backend running`);
   console.log(`🌐 Port: ${PORT}`);
 
   console.log(
