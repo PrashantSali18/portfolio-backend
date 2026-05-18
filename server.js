@@ -2,14 +2,17 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
-import nodemailer from "nodemailer";
 import rateLimit from "express-rate-limit";
 import cron from "node-cron";
+import { Resend } from "resend";
 
 import {
   acknowledgmentTemplate,
   notificationTemplate,
 } from "./emailTemplates.js";
+
+// Initialize Resend
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
 const PORT = process.env.PORT || 10000;
@@ -52,7 +55,7 @@ app.use(
       }
 
       // Allow Vercel preview deployments
-      if (origin.endsWith(".vercel.app")) {
+      if (origin && origin.endsWith(".vercel.app")) {
         return callback(null, true);
       }
 
@@ -87,30 +90,13 @@ const contactLimiter = rateLimit({
 });
 
 // =========================================================
-// NODEMAILER CONFIGURATION
+// RESEND VERIFICATION
 // =========================================================
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-});
-
-// =========================================================
-// SMTP VERIFY
-// =========================================================
-transporter.verify((err) => {
-  if (err) {
-    console.error("\n❌ SMTP VERIFY FAILED");
-    console.error("Code:", err.code);
-    console.error("Message:", err.message);
-    console.error("Full Error:", err);
-  } else {
-    console.log("\n✅ SMTP connection verified");
-  }
-});
+if (process.env.RESEND_API_KEY) {
+  console.log("✅ Resend API configured");
+} else {
+  console.warn("⚠️ RESEND_API_KEY not set - Email sending will fail!");
+}
 
 // =========================================================
 // INPUT VALIDATION
@@ -154,6 +140,7 @@ app.get("/", (_req, res) => {
   return res.status(200).json({
     status: "ok",
     service: "Prashant Sali Portfolio Backend",
+    message: "Backend is running with Resend API",
   });
 });
 
@@ -166,7 +153,7 @@ app.get("/health", (_req, res) => {
 });
 
 // =========================================================
-// CONTACT FORM API
+// CONTACT FORM API (UPDATED FOR RESEND)
 // =========================================================
 app.post("/api/contact", contactLimiter, async (req, res) => {
   try {
@@ -196,64 +183,75 @@ app.post("/api/contact", contactLimiter, async (req, res) => {
     const cleanEmail = email.trim().toLowerCase();
     const cleanMessage = message.trim();
 
+    console.log(`📧 Processing contact from: ${cleanName} (${cleanEmail})`);
+
     // =========================
-    // ACKNOWLEDGEMENT EMAIL
+    // NOTIFICATION EMAIL (to you first - more important)
     // =========================
-    await transporter.sendMail({
-      from: `"Prashant Sali" <${process.env.GMAIL_USER}>`,
-
-      to: cleanEmail,
-
-      subject: `Thanks for reaching out, ${cleanName}! 👋`,
-
-      html: acknowledgmentTemplate({
-        name: cleanName,
-        message: cleanMessage,
-      }),
+    const notificationHtml = notificationTemplate({
+      name: cleanName,
+      email: cleanEmail,
+      message: cleanMessage,
     });
 
-    // =========================
-    // NOTIFICATION EMAIL
-    // =========================
-    await transporter.sendMail({
-      from: `"Portfolio Contact Form" <${process.env.GMAIL_USER}>`,
-
-      to: process.env.NOTIFY_EMAIL,
-
+    const { error: notifyError } = await resend.emails.send({
+      from: `Portfolio Contact <onboarding@resend.dev>`,
+      to: process.env.NOTIFY_EMAIL || "prashantsali502@gmail.com",
       replyTo: cleanEmail,
-
-      subject: `🔔 New message from ${cleanName}`,
-
-      html: notificationTemplate({
-        name: cleanName,
-        email: cleanEmail,
-        message: cleanMessage,
-      }),
+      subject: `🔔 Portfolio Contact: New message from ${cleanName}`,
+      html: notificationHtml,
     });
 
-    console.log(`✅ Emails successfully sent for ${cleanName}`);
+    if (notifyError) {
+      console.error("❌ Notification email error:", notifyError);
+      throw new Error(`Notification failed: ${notifyError.message}`);
+    }
+
+    console.log(`✅ Notification email sent to you for ${cleanName}`);
+
+    // =========================
+    // ACKNOWLEDGEMENT EMAIL (to the person who filled the form)
+    // =========================
+    const ackHtml = acknowledgmentTemplate({
+      name: cleanName,
+      message: cleanMessage,
+    });
+
+    const { error: ackError } = await resend.emails.send({
+      from: `Prashant Sali <onboarding@resend.dev>`,
+      to: cleanEmail,
+      subject: `Thanks for reaching out, ${cleanName}! 👋`,
+      html: ackHtml,
+    });
+
+    if (ackError) {
+      console.error("❌ Acknowledgement email error:", ackError);
+      // Don't throw here - main email (notification) already sent
+      console.warn(`⚠️ Could not send ack email to ${cleanEmail}`);
+    } else {
+      console.log(`✅ Acknowledgement email sent to ${cleanEmail}`);
+    }
 
     return res.status(200).json({
       success: true,
-      message: "Message sent successfully! Please check your inbox.",
+      message: "Message sent successfully! I'll get back to you soon.",
     });
   } catch (err) {
     console.error("\n❌ EMAIL SEND FAILED");
-    console.error("Code:", err.code);
     console.error("Message:", err.message);
     console.error("Full Error:", err);
 
     return res.status(500).json({
       success: false,
-      error: "Failed to send message. Please try again later.",
+      error:
+        "Failed to send message. Please try again later or email me directly at prashantsali502@gmail.com",
     });
   }
 });
 
 // =========================================================
-// KEEP RENDER SERVICE AWAKE
+// KEEP RENDER SERVICE AWAKE (Ping every 10 minutes)
 // =========================================================
-
 cron.schedule("*/10 * * * *", async () => {
   try {
     const response = await fetch(
@@ -299,8 +297,8 @@ app.listen(PORT, () => {
   console.log(`🌐 Port: ${PORT}`);
 
   console.log(
-    `📧 Gmail Config: ${
-      process.env.GMAIL_USER ? "✅ CONFIGURED" : "❌ NOT SET"
+    `📧 Resend Config: ${
+      process.env.RESEND_API_KEY ? "✅ CONFIGURED" : "❌ NOT SET"
     }`,
   );
 
@@ -311,4 +309,14 @@ app.listen(PORT, () => {
   );
 
   console.log(`🔗 Frontend URL: ${process.env.FRONTEND_URL || "❌ NOT SET"}\n`);
+});
+
+// =========================================================
+// HEALTH CHECK
+// =========================================================
+app.get("/health", (_req, res) => {
+  return res.status(200).json({
+    success: true,
+    message: "Healthy",
+  });
 });
